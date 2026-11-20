@@ -3,27 +3,28 @@ package io.github.skb8.eng;
 import android.app.Activity;
 import android.os.Build;
 import android.os.Bundle;
-import android.util.Log;
+import android.view.MotionEvent;
 import android.view.Surface;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
 import android.view.View;
 import android.view.WindowInsets;
 import android.view.WindowInsetsController;
-import android.widget.Toast;
 
-public final class MainActivity extends Activity implements SurfaceHolder.Callback2 {
+public final class MainActivity extends Activity implements SurfaceHolder.Callback {
     static {
         System.loadLibrary("eng");
     }
 
-    private long renderer;
+    private long surfaceOwner;
+    private int pointer = MotionEvent.INVALID_POINTER_ID;
 
     @Override
     protected void onCreate(Bundle state) {
         super.onCreate(state);
         SurfaceView view = new SurfaceView(this);
         view.getHolder().addCallback(this);
+        view.setOnTouchListener(this::forwardTouch);
         setContentView(view);
     }
 
@@ -51,50 +52,45 @@ public final class MainActivity extends Activity implements SurfaceHolder.Callba
 
     @Override
     public void surfaceCreated(SurfaceHolder holder) {
-        // The surface receives its initial size before surfaceRedrawNeeded.
+        // surfaceChanged supplies the window size for the first frame.
     }
 
     @Override
     public void surfaceChanged(SurfaceHolder holder, int format, int width, int height) {
-        releaseRenderer();
-    }
-
-    @Override
-    public void surfaceRedrawNeeded(SurfaceHolder holder) {
-        if (!holder.getSurface().isValid() || holder.getSurfaceFrame().isEmpty()) {
-            return;
-        }
-
-        try {
-            for (int attempt = 0; attempt < 2; ++attempt) {
-                if (renderer == 0) {
-                    renderer = nativeCreate(holder.getSurface());
-                }
-                if (nativeDraw(renderer)) {
-                    return;
-                }
-                releaseRenderer();
-            }
-        } catch (RuntimeException error) {
-            releaseRenderer();
-            Log.e("eng", "Vulkan rendering failed", error);
-            Toast.makeText(this, error.getMessage(), Toast.LENGTH_LONG).show();
-        }
+        surfaceOwner = nativeSurface(holder.getSurface(), surfaceOwner, width, height);
     }
 
     @Override
     public void surfaceDestroyed(SurfaceHolder holder) {
-        releaseRenderer();
-    }
-
-    private void releaseRenderer() {
-        if (renderer != 0) {
-            nativeDestroy(renderer);
-            renderer = 0;
+        if (surfaceOwner != 0) {
+            nativeSurface(null, surfaceOwner, 0, 0);
+            surfaceOwner = 0;
         }
+        pointer = MotionEvent.INVALID_POINTER_ID;
     }
 
-    private static native long nativeCreate(Surface surface);
-    private static native boolean nativeDraw(long renderer);
-    private static native void nativeDestroy(long renderer);
+    private boolean forwardTouch(View view, MotionEvent event) {
+        int action = event.getActionMasked();
+        if (action == MotionEvent.ACTION_DOWN) {
+            pointer = event.getPointerId(0);
+        } else if (action == MotionEvent.ACTION_POINTER_UP
+                && event.getPointerId(event.getActionIndex()) == pointer) {
+            action = MotionEvent.ACTION_UP;
+        }
+
+        if (action == MotionEvent.ACTION_DOWN || action == MotionEvent.ACTION_MOVE) {
+            int index = event.findPointerIndex(pointer);
+            if (index >= 0 && view.getWidth() > 0 && view.getHeight() > 0) {
+                nativeTouch(surfaceOwner, action, event.getX(index) / view.getWidth(),
+                        event.getY(index) / view.getHeight());
+            }
+        } else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+            nativeTouch(surfaceOwner, action, 0, 0);
+            pointer = MotionEvent.INVALID_POINTER_ID;
+        }
+        return true;
+    }
+
+    private static native long nativeSurface(Surface surface, long owner, int width, int height);
+    private static native void nativeTouch(long owner, int action, float x, float y);
 }
